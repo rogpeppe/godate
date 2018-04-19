@@ -13,7 +13,7 @@ Usage: godate [flags] [time...]
 - -l
 	print local time (default is UTC)
 
-By default rfcdate prints the current time in RFC3339 format in
+By default godate prints the current time in RFC3339 format in
 the UTC time zone. The -f flag can be used to change the format
 that is printed (see https://golang.org/pkg/time/#Time.Format
 for details). The reference date is:
