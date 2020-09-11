@@ -261,9 +261,9 @@ for details). The reference date is:
 
 	Mon Jan 2 15:04:05 -0700 MST 2006
 
-The format may be the name of one of the predefined format
+The format may also be the name of one of the predefined format
 constants in the time package (case-insensitive), in which case that format will be used.
-The supported formats are these:
+The supported predefined names are:
 
 `[1:])
 	type format struct {
