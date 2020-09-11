@@ -13,12 +13,22 @@ import (
 	"time"
 )
 
+//go:generate bash getzones.bash
+
+// Possible TODOs:
+// - support for rounding and truncation (how would that work syntactically?).
+//
+// 	godate now +5m round:1h  trunc:1day
+//
+// 	rounding for date durations might be hard.
+
 var (
 	outFormat = flag.String("o", "rfc3339nano", "use Go-style time format string (or name)")
 	inFormat  = flag.String("i", "unix", "interpret argument times as this Go-style format (or name)")
 	file      = flag.String("f", "", "read times from named file, one per line; - means stdin")
 	tzIn      = flag.String("itz", "", "interpret argument times in this time zone location (default local)")
 	tzOut     = flag.String("otz", "", "print times in this time zone location (default local)")
+	alias     = flag.Bool("alias", false, "when printing time zone matches, also print time zone aliases")
 	utc       = flag.Bool("u", false, "default to UTC time zone rather than local")
 )
 
@@ -83,12 +93,16 @@ func main() {
 	if len(args) == 0 {
 		args = []string{"now"}
 	}
+	if args[0] == "tz" {
+		printZones(args[1:])
+		return
+	}
 	i := 0
 	for i < len(args) {
 		arg := args[i]
 		t, err := parseTime(arg)
 		if err != nil {
-			fatalf("parse error on %q: %v\n", arg, err)
+			fatalf("parse error on %q: %v", arg, err)
 		}
 		i++
 		for i < len(args) {
@@ -205,7 +219,10 @@ var errLeadingInt = errors.New("bad [0-9]*") // never printed
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `
-Usage: godate [flags] [[time [+-]duration...]...]
+Usage:
+	godate [flags] [[time [+-]duration...]...]
+or:
+	godate tz [name...]
 Flags:
 `[1:])
 	flag.PrintDefaults()
@@ -218,6 +235,12 @@ arguments adjusting the time. Godate reads all the times
 according to the format specified by the -i flag, adjusts them by
 the offsets, and prints them in the format specified by the -o flag.
 The special time "now" is recognized as the current time.
+
+As a special case, if the first argument is "tz", then godate prints all
+the available time zones (note: this uses an internal list and may not
+exactly match the system-provided time zones). If any arguments are
+provided after "tz", only time zones matching those arguments (see below
+for timezone matching behavior) are printed.
 
 The format for a duration is either as accepted by Go's ParseDuration
 function (see https://golang.org/pkg/time/#Time.ParseDuration for details)
@@ -270,6 +293,13 @@ When one or more arguments are provided, they will be used as the time
 to print instead of the current time. The -in flag can be used to specify
 what format to interpret these arguments in. Again, unix and unixnano
 can be used to specify input in seconds or nanoseconds since the Unix epoch.
+
+Time zones can be specified with the -itz and -otz flags. As a convenience,
+if the specified zone does not exactly match one of the known zones,
+a case-insensitive match is tried, and then a substring match.
+If the result is unambiguous, the matching time zone is used
+(for example "-otz london" can be used to select the "Europe/London"
+time zone).
 `[1:])
 	os.Exit(2)
 }
@@ -362,8 +392,24 @@ func loadLocation(loc string) (*time.Location, error) {
 		return nil, nil
 	}
 	tz, err := time.LoadLocation(loc)
+	if err == nil {
+		return tz, nil
+	}
+	available := zoneMatch(loc)
+	if len(available) > 1 {
+		// If the zones are actually all referring to the same underlying time zone, then
+		// allow it (for example, "samoa" could match both "US/Samoa" and "Pacific/Samoa"
+		// but they're actually both the same)
+		if !allIdenticalZones(available) {
+			return nil, fmt.Errorf("ambiguous time zone %q (%d matches; use 'godate tz %s' to see them)", loc, len(available), loc)
+		}
+	}
+	if len(available) == 0 {
+		return nil, err
+	}
+	tz, err = time.LoadLocation(available[0])
 	if err != nil {
-		return nil, fmt.Errorf("cannot load location %q: %v", loc, err)
+		return nil, fmt.Errorf("time zone %s not available in system time zone database: %v", available[0], err)
 	}
 	return tz, nil
 }
@@ -378,6 +424,82 @@ func formatCustom(t time.Time, format string) string {
 		return fmt.Sprint(t.UnixNano())
 	default:
 		panic("unknown unix time format")
+	}
+}
+
+func printZones(args []string) {
+	if len(args) == 0 {
+		args = []string{""}
+	}
+	var tzs []string
+	zones := make(map[string]bool)
+	for _, arg := range args {
+		for _, tz := range zoneMatch(arg) {
+			zones[tz] = true
+		}
+	}
+	if len(zones) == 0 {
+		fatalf("no matching time zones found")
+	}
+	tzs = make([]string, 0, len(zones))
+	for zone := range zones {
+		tzs = append(tzs, zone)
+	}
+	sort.Strings(tzs)
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 1, ' ', 0)
+	for _, tz := range tzs {
+		linked := zoneNames[tz]
+		if !*alias || linked == "" {
+			fmt.Fprintf(w, "%s\n", tz)
+		} else {
+			fmt.Fprintf(w, "%s\t%s\n", tz, linked)
+		}
+	}
+	w.Flush()
+}
+
+func zoneMatch(tz string) []string {
+	if _, ok := zoneNames[tz]; ok {
+		return []string{tz}
+	}
+	var matches []string
+	for name := range zoneNames {
+		if strings.EqualFold(name, tz) {
+			matches = append(matches, name)
+		}
+	}
+	if len(matches) > 0 {
+		return matches
+	}
+	tz = strings.ToLower(tz)
+	for name := range zoneNames {
+		if strings.Contains(strings.ToLower(name), tz) {
+			matches = append(matches, name)
+		}
+	}
+	return matches
+}
+
+func allIdenticalZones(tzs []string) bool {
+	if len(tzs) < 2 {
+		return true
+	}
+	ctz := canonicalTimezone(tzs[0])
+	for _, tz := range tzs[1:] {
+		if canonicalTimezone(tz) != ctz {
+			return false
+		}
+	}
+	return true
+}
+
+func canonicalTimezone(tz string) string {
+	for {
+		link := zoneNames[tz]
+		if link == "" {
+			return tz
+		}
+		tz = link
 	}
 }
 
