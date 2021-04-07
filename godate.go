@@ -6,11 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
+
+	"github.com/rogpeppe/godate/timeformat"
 )
 
 //go:generate bash getzones.bash
@@ -24,12 +24,13 @@ import (
 
 var (
 	outFormat = flag.String("o", "rfc3339nano", "use Go-style time format string (or name)")
-	inFormat  = flag.String("i", "unix", "interpret argument times as this Go-style format (or name)")
+	inFormat  = flag.String("i", "any", "interpret argument times as this Go-style format (or name)")
 	file      = flag.String("f", "", "read times from named file, one per line; - means stdin")
 	tzIn      = flag.String("itz", "", "interpret argument times in this time zone location (default local)")
 	tzOut     = flag.String("otz", "", "print times in this time zone location (default local)")
 	alias     = flag.Bool("alias", false, "when printing time zone matches, also print time zone aliases")
 	utc       = flag.Bool("u", false, "default to UTC time zone rather than local")
+	abs       = flag.Bool("abs", false, "suppress filling incomplete info from current time")
 )
 
 var knownFormats = map[string]string{
@@ -52,7 +53,9 @@ var knownFormats = map[string]string{
 	"go":          "2006-01-02 15:04:05.999999999 -0700 MST",
 	"unix":        "custom",
 	"unixmilli":   "custom",
+	"unixmicro":   "custom",
 	"unixnano":    "custom",
+	"any":         "custom",
 }
 
 func main() {
@@ -217,93 +220,6 @@ func leadingInt(s string) (x int32, rem string, err error) {
 
 var errLeadingInt = errors.New("bad [0-9]*") // never printed
 
-func usage() {
-	fmt.Fprintf(os.Stderr, `
-Usage:
-	godate [flags] [[time [+-]duration...]...]
-or:
-	godate tz [name...]
-Flags:
-`[1:])
-	flag.PrintDefaults()
-
-	fmt.Fprintf(os.Stderr, `
-
-This command parses and prints times in arbitrary formats and time zones.
-Each argument is a time followed by an arbitrary number of offset
-arguments adjusting the time. Godate reads all the times
-according to the format specified by the -i flag, adjusts them by
-the offsets, and prints them in the format specified by the -o flag.
-The special time "now" is recognized as the current time.
-
-As a special case, if the first argument is "tz", then godate prints all
-the available time zones (note: this uses an internal list and may not
-exactly match the system-provided time zones). If any arguments are
-provided after "tz", only time zones matching those arguments (see below
-for timezone matching behavior) are printed.
-
-The format for a duration is either as accepted by Go's ParseDuration
-function (see https://golang.org/pkg/time/#Time.ParseDuration for details)
-or a similar format that specifies years (year, y), months (month, mo),
-weeks (week, w) or days (day, d). For example, this would print
-the local time 1 month and 3 days hence and 20 minutes before the
-current time:
-
-	godate now +1month3days -20m
-
-Note that year, month, and week durations cannot be mixed with
-other duration kinds in the same argument.
-
-By default godate prints the current time in RFC3339 format in
-the local time zone. The -o flag can be used to change the format
-that is printed (see https://golang.org/pkg/time/#Time.Format
-for details). The reference date is:
-
-	Mon Jan 2 15:04:05 -0700 MST 2006
-
-The format may also be the name of one of the predefined format
-constants in the time package (case-insensitive), in which case that format will be used.
-The supported predefined names are:
-
-`[1:])
-	type format struct {
-		name   string
-		format string
-	}
-	var formats []format
-	for name, f := range knownFormats {
-		formats = append(formats, format{name, f})
-	}
-	sort.Slice(formats, func(i, j int) bool {
-		return formats[i].name < formats[j].name
-	})
-	w := tabwriter.NewWriter(os.Stderr, 4, 4, 1, ' ', 0)
-	for _, f := range formats {
-		fmt.Fprintf(w, "\t%s\t%s\n", f.name, f.format)
-	}
-	w.Flush()
-
-	fmt.Fprintf(os.Stderr, `
-
-The unix, unixmilla and unixnano formats are special cases that print the number of seconds,
-milliseconds or nanoseconds since the Unix epoch (Jan 1st 1970). The "go" format is the
-format used by the time package to print times by default.
-
-When one or more arguments are provided, they will be used as the time
-to print instead of the current time. The -in flag can be used to specify
-what format to interpret these arguments in. Again, unix and unixnano
-can be used to specify input in seconds or nanoseconds since the Unix epoch.
-
-Time zones can be specified with the -itz and -otz flags. As a convenience,
-if the specified zone does not exactly match one of the known zones,
-a case-insensitive match is tried, and then a substring match.
-If the result is unambiguous, the matching time zone is used
-(for example "-otz london" can be used to select the "Europe/London"
-time zone).
-`[1:])
-	os.Exit(2)
-}
-
 func timeParser() (func(s string) (time.Time, error), error) {
 	tz, err := loadLocation(*tzIn)
 	if err != nil {
@@ -312,23 +228,29 @@ func timeParser() (func(s string) (time.Time, error), error) {
 	if tz == nil {
 		tz = time.Local
 	}
+	now := time.Now().In(tz)
 	format := *inFormat
 	var parser func(s string) (time.Time, error)
 	if format1, ok := knownFormats[strings.ToLower(format)]; ok {
 		if format1 == "custom" {
 			parser = func(s string) (time.Time, error) {
-				return parseCustom(format, s, tz)
+				return parseCustom(format, s, tz, now)
 			}
 		} else {
 			format = format1
 		}
 	}
 	if parser == nil {
+		components := timeformat.LayoutComponents(format)
+		now := time.Now()
 		parser = func(s string) (time.Time, error) {
-			return time.ParseInLocation(format, s, tz)
+			t, err := time.ParseInLocation(format, s, tz)
+			if err != nil || *abs {
+				return t, err
+			}
+			return relativeTime(t, components, now), nil
 		}
 	}
-	now := time.Now().In(tz)
 	return func(s string) (time.Time, error) {
 		if s == "now" {
 			return now, nil
@@ -337,7 +259,33 @@ func timeParser() (func(s string) (time.Time, error), error) {
 	}, nil
 }
 
-func parseCustom(format, s string, tz *time.Location) (time.Time, error) {
+var componentsBySignificance = []timeformat.Components{
+	timeformat.Year,
+	timeformat.Month,
+	timeformat.Day,
+	timeformat.Hour,
+	timeformat.Minute,
+	timeformat.Second,
+}
+
+func relativeTime(t time.Time, components timeformat.Components, now time.Time) time.Time {
+	td := timeformat.TimeDate(t)
+	nowd := timeformat.TimeDate(now)
+	var toSet timeformat.Components
+	for _, c := range componentsBySignificance {
+		if components&c != 0 {
+			break
+		}
+		toSet |= c
+	}
+	td.SetComponents(nowd, toSet)
+	return td.Time()
+}
+
+func parseCustom(format, s string, tz *time.Location, now time.Time) (time.Time, error) {
+	if format == "any" {
+		return parseAny(s, tz, now)
+	}
 	ts, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("unix?: %v", err)
@@ -347,11 +295,66 @@ func parseCustom(format, s string, tz *time.Location) (time.Time, error) {
 		return time.Unix(ts, 0).In(tz), nil
 	case "unixnano":
 		return time.Unix(0, ts).In(tz), nil
+	case "unixmicro":
+		return time.Unix(ts/1e6, (ts%1e6)*1e3).In(tz), nil
 	case "unixmilli":
-		return time.Unix(ts/1000, (ts%1000)*1e6).In(tz), nil
+		return time.Unix(ts/1e3, (ts%1e3)*1e6).In(tz), nil
 	default:
 		panic("unknown unix time format")
 	}
+}
+
+var anyFormats = []string{
+	"2006",
+	"2006-01-02",
+	"2006-01-02T15:04:05Z",
+	"2006-01-02 15:04:05Z",
+	"2006-01-02T15:04:05",
+	"2006-01-02 15:04:05",
+	"01-02 15:04",
+	"Jan 1",
+	"Jan 1 15:04",
+	"Jan 1 15:04:05",
+	"1 Jan",
+	"1 Jan 15:04",
+	"1 Jan 15:04:05",
+	"15:04",
+	"15:04:05",
+	"3pm",
+	"3PM",
+	"3:04pm",
+	"3:04PM",
+	"3:04:05pm",
+	"3:04:05PM",
+}
+
+var unixFormats = []string{"unixnano", "unixmicro", "unixmilli", "unix"}
+
+func parseAny(s string, tz *time.Location, now time.Time) (time.Time, error) {
+	if _, err := strconv.ParseInt(s, 10, 64); err == nil {
+		for _, format := range unixFormats {
+			t, err := parseCustom(format, s, tz, now)
+			if err != nil {
+				continue
+			}
+			if format == "unix" {
+				return t, nil
+			}
+			tooSmall := t.Year() == 1970 && t.Month() == time.January ||
+				t.Year() == 1969 && t.Month() != time.December
+			if !tooSmall {
+				return t, nil
+			}
+		}
+	}
+	for _, format := range anyFormats {
+		t, err := time.ParseInLocation(format, s, tz)
+		if err != nil {
+			continue
+		}
+		return relativeTime(t, timeformat.LayoutComponents(format), now), nil
+	}
+	return time.Time{}, fmt.Errorf("cannot parse %q as arbitrary format", s)
 }
 
 func formatter() (func(time.Time) string, error) {
@@ -420,42 +423,16 @@ func formatCustom(t time.Time, format string) string {
 		return fmt.Sprint(t.Unix())
 	case "unixmilli":
 		return fmt.Sprint(int64(time.Duration(t.UnixNano()) / time.Millisecond))
+	case "unixmicro":
+		return fmt.Sprint(int64(time.Duration(t.UnixNano()) / time.Microsecond))
 	case "unixnano":
 		return fmt.Sprint(t.UnixNano())
+	case "any":
+		// Arbitrary.
+		return t.Format(time.RFC3339)
 	default:
 		panic("unknown unix time format")
 	}
-}
-
-func printZones(args []string) {
-	if len(args) == 0 {
-		args = []string{""}
-	}
-	var tzs []string
-	zones := make(map[string]bool)
-	for _, arg := range args {
-		for _, tz := range zoneMatch(arg) {
-			zones[tz] = true
-		}
-	}
-	if len(zones) == 0 {
-		fatalf("no matching time zones found")
-	}
-	tzs = make([]string, 0, len(zones))
-	for zone := range zones {
-		tzs = append(tzs, zone)
-	}
-	sort.Strings(tzs)
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 1, ' ', 0)
-	for _, tz := range tzs {
-		linked := zoneNames[tz]
-		if !*alias || linked == "" {
-			fmt.Fprintf(w, "%s\n", tz)
-		} else {
-			fmt.Fprintf(w, "%s\t%s\n", tz, linked)
-		}
-	}
-	w.Flush()
 }
 
 func zoneMatch(tz string) []string {

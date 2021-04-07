@@ -1,31 +1,24 @@
-# godate
+package main
 
-A simple command to print dates with Go-style formatting
+import (
+	"flag"
+	"fmt"
+	"os"
+	"sort"
+	"text/tabwriter"
+)
 
+func usage() {
+	fmt.Fprintf(os.Stderr, `
 Usage:
-
 	godate [flags] [[time [+-]duration...]...]
-
 or:
+	godate tz [name...]
+Flags:
+`[1:])
+	flag.PrintDefaults()
 
-	godate [-alias] tz [name...]
-
-## Flags
--   -abs
-    	suppress filling incomplete info from current time
--   -alias
-    	when printing time zone matches, also print time zone aliases
--   -f string
-    	read times from named file, one per line; - means stdin
--   -i string
-    	interpret argument times as this Go-style format (or name) (default "any")
--   -itz string
-    	interpret argument times in this time zone location (default local)
--   -o string
-    	use Go-style time format string (or name) (default "rfc3339nano")
--   -otz string
-    	print times in this time zone location (default local)
--   -u	default to UTC time zone rather than local
+	fmt.Fprintf(os.Stderr, `
 
 This command parses and prints times in arbitrary formats and time zones.
 Each argument is a time followed by an arbitrary number of offset
@@ -33,12 +26,6 @@ arguments adjusting the time. Godate reads all the times
 according to the format specified by the -i flag, adjusts them by
 the offsets, and prints them in the format specified by the -o flag.
 The special time "now" is recognized as the current time.
-
-As a special case, if the first argument is "tz", then godate prints all
-the available time zones (note: this uses an internal list and may not
-exactly match the system-provided time zones). If any arguments are
-provided after "tz", only time zones matching those arguments (see below
-for timezone matching behavior) are printed.
 
 When the input time is missing some parts, any more significant parts
 will be filled in using the current time. So, for example,
@@ -98,34 +85,33 @@ The format may also be the name of one of the predefined format
 constants in the time package (case-insensitive), in which case that format will be used.
 The supported predefined names are:
 
-    ansic       Mon Jan _2 15:04:05 2006
-    git         Mon Jan _2 15:04:05 2006 -0700
-    go          2006-01-02 15:04:05.999999999 -0700 MST
-    kitchen     3:04PM
-    rfc1123     Mon, 02 Jan 2006 15:04:05 MST
-    rfc1123z    Mon, 02 Jan 2006 15:04:05 -0700
-    rfc3339     2006-01-02T15:04:05Z07:00
-    rfc3339nano 2006-01-02T15:04:05.999999999Z07:00
-    rfc822      02 Jan 06 15:04 MST
-    rfc822z     02 Jan 06 15:04 -0700
-    rfc850      Monday, 02-Jan-06 15:04:05 MST
-    rubydate    Mon Jan 02 15:04:05 -0700 2006
-    stamp       Jan _2 15:04:05
-    stampmicro  Jan _2 15:04:05.000000
-    stampmilli  Jan _2 15:04:05.000
-    stampnano   Jan _2 15:04:05.000000000
-    unix        custom
-    unixdate    Mon Jan _2 15:04:05 MST 2006
-    unixmilli   custom
-    unixnano    custom
+`[1:])
+	type format struct {
+		name   string
+		format string
+	}
+	var formats []format
+	for name, f := range knownFormats {
+		formats = append(formats, format{name, f})
+	}
+	sort.Slice(formats, func(i, j int) bool {
+		return formats[i].name < formats[j].name
+	})
+	w := tabwriter.NewWriter(os.Stderr, 4, 4, 1, ' ', 0)
+	for _, f := range formats {
+		fmt.Fprintf(w, "\t%s\t%s\n", f.name, f.format)
+	}
+	w.Flush()
 
-The unix, unixmilla and unixnano formats are special cases that print the number of seconds,
-milliseconds or nanoseconds since the Unix epoch (Jan 1st 1970). The "go" format is the
+	fmt.Fprintf(os.Stderr, `
+
+The unix, unixmilli, unixmicro and unixnano formats are special cases that print the number of seconds,
+milliseconds, microseconds or nanoseconds since the Unix epoch (Jan 1st 1970). The "go" format is the
 format used by the time package to print times by default.
 
 When one or more arguments are provided, they will be used as the time
 to print instead of the current time. The -in flag can be used to specify
-what format to interpret these arguments in. Again, unix and unixnano
+what format to interpret these arguments in. Again, unix, unixmilli, unixmicro and unixnano
 can be used to specify input in seconds or nanoseconds since the Unix epoch.
 
 Time zones can be specified with the -itz and -otz flags. As a convenience,
@@ -134,3 +120,37 @@ a case-insensitive match is tried, and then a substring match.
 If the result is unambiguous, the matching time zone is used
 (for example "-otz london" can be used to select the "Europe/London"
 time zone).
+`[1:])
+	os.Exit(2)
+}
+
+func printZones(args []string) {
+	if len(args) == 0 {
+		args = []string{""}
+	}
+	var tzs []string
+	zones := make(map[string]bool)
+	for _, arg := range args {
+		for _, tz := range zoneMatch(arg) {
+			zones[tz] = true
+		}
+	}
+	if len(zones) == 0 {
+		fatalf("no matching time zones found")
+	}
+	tzs = make([]string, 0, len(zones))
+	for zone := range zones {
+		tzs = append(tzs, zone)
+	}
+	sort.Strings(tzs)
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 1, ' ', 0)
+	for _, tz := range tzs {
+		linked := zoneNames[tz]
+		if !*alias || linked == "" {
+			fmt.Fprintf(w, "%s\n", tz)
+		} else {
+			fmt.Fprintf(w, "%s\t%s\n", tz, linked)
+		}
+	}
+	w.Flush()
+}
