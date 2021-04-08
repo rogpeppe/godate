@@ -305,9 +305,11 @@ func parseCustom(format, s string, tz *time.Location, now time.Time) (time.Time,
 }
 
 var anyFormats = []string{
+	knownFormats["git"],
+	time.RFC3339,
+	knownFormats["unixdate"],
 	"2006",
 	"2006-01-02",
-	"2006-01-02T15:04:05Z",
 	"2006-01-02 15:04:05Z",
 	"2006-01-02T15:04:05",
 	"2006-01-02 15:04:05",
